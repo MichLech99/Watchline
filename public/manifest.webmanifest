@@ -1,0 +1,10 @@
+{
+  "name": "Watchline",
+  "short_name": "Watchline",
+  "description": "Il tuo diario personale per film e serie TV.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#080b15",
+  "theme_color": "#080b15",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

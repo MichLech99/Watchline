@@ -1,0 +1,20 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /watchline_users/{userId} {
+      function ownsDocument() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      function validState() {
+        return request.resource.data.keys().hasOnly(['library', 'favoriteGenres', 'updatedAt'])
+          && request.resource.data.library is list
+          && request.resource.data.favoriteGenres is list;
+      }
+
+      allow read, delete: if ownsDocument();
+      allow create, update: if ownsDocument() && validState();
+    }
+  }
+}
