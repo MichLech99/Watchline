@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test": "tsc -p tests/tsconfig.json && node work/safety-tests/tests/cloud-data.test.js && node work/safety-tests/tests/cloud-sync.test.js && node work/safety-tests/tests/library-safety.test.js",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"

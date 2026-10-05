@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import {
   Activity, BarChart3, Bell, Bookmark, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
   Circle, CircleCheck, Clock3, Clapperboard, Eye, Film, Flame, Home, Library, ListFilter, MonitorPlay, Plus, RefreshCw, Search as SearchIcon,
@@ -7,8 +7,11 @@ import {
 import { demoDiscovery, demoEpisodes, STATUS_META } from './data'
 import { CATALOG_GENRES, getCatalogGenreIds, getCatalogGenresForIds, getCatalogGenresForType, getExploreCatalog, getItalianCatalog, getItemGenreIds, getLiveDetails, getSeasonEpisodes, getSimilarTitles, itemMatchesCatalogGenres, searchTmdb } from './api'
 import type { ExploreFeed } from './api'
-import { loadLibrary, saveLibrary } from './storage'
-import { getCloudSession, isCloudConfigured, loadCloudSnapshot, onCloudAuthChange, saveCloudSnapshot, signInWithUsername, signOutCloud } from './cloud'
+import { loadLibrary } from './storage'
+import { LibraryPersistence } from './library-persistence'
+import { LibraryController } from './library-controller'
+import { LibrarySafetyPanel } from './LibrarySafetyPanel'
+import { isCloudConfigured, commitCloudChanges, onCloudAuthChange, signInWithUsername, signOutCloud } from './cloud'
 import type { CloudProfile, CloudSession } from './cloud'
 import type { Episode, MediaItem, MediaStatus, SeasonStatus, TabId } from './types'
 
@@ -21,7 +24,7 @@ const navItems: { id: TabId; label: string; icon: typeof Home }[] = [
 ]
 
 type UserProfile = CloudProfile
-type CloudSyncStatus = 'unavailable' | 'checking' | 'signed-out' | 'syncing' | 'synced' | 'error'
+type CloudSyncStatus = 'unavailable' | 'checking' | 'signed-out' | 'syncing' | 'synced' | 'error' | 'storage-error'
 const PROFILE_KEY = 'watchline-profile-v1'
 const loadProfile = (): UserProfile => {
   try {
@@ -54,14 +57,15 @@ const toLocalDateKey = (value: Date = new Date()) => {
 }
 
 const isUpcomingDate = (value?: string) => Boolean(value && value >= toLocalDateKey())
+const hasAnnouncedContinuation = (item: MediaItem) =>
+  isUpcomingDate(item.nextAirDate) || ['Returning Series', 'In Production', 'Planned'].includes(item.seriesStatus || '')
 
 function deriveStatus(item: MediaItem): MediaStatus {
   if (item.statusIsManual) return item.status
   if (item.type === 'movie') return item.status === 'completed' ? 'completed' : 'watchlist'
   if (item.status === 'watchlist' && item.watchedEpisodes === 0) return 'watchlist'
   if (item.watchedEpisodes < item.totalEpisodes) return 'watching'
-  if (isUpcomingDate(item.nextAirDate)) return 'caught-up'
-  return item.status === 'completed' ? 'completed' : 'waiting'
+  return hasAnnouncedContinuation(item) ? 'waiting' : 'completed'
 }
 
 function formatDate(value?: string, options: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short' }) {
@@ -71,8 +75,8 @@ function formatDate(value?: string, options: Intl.DateTimeFormatOptions = { day:
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>('home')
-  const [library, setLibrary] = useState<MediaItem[]>(loadLibrary)
-  const [profile, setProfile] = useState<UserProfile>(loadProfile)
+  const [library, setLibraryState] = useState<MediaItem[]>(loadLibrary)
+  const [profile, setProfileState] = useState<UserProfile>(loadProfile)
   const [discovery, setDiscovery] = useState<MediaItem[]>([])
   const [upcomingCatalog, setUpcomingCatalog] = useState<MediaItem[]>([])
   const [selected, setSelected] = useState<MediaItem | null>(null)
@@ -87,10 +91,17 @@ function App() {
   const searchReturnScroll = useRef<number | null>(null)
   const detailRequestRef = useRef(0)
   const seasonRequestRef = useRef(0)
-  const libraryRef = useRef(library)
-  const profileRef = useRef(profile)
-  const cloudReadyRef = useRef(false)
-  const cloudRequestRef = useRef(0)
+  const controllerRef = useRef<LibraryController | null>(null)
+  const [online, setOnline] = useState(navigator.onLine)
+
+  const setLibrary = (next: SetStateAction<MediaItem[]>) => {
+    const controller = controllerRef.current
+    if (!controller) { setToast('Salvataggio non disponibile: riprova la sincronizzazione'); return false }
+    return controller.update((snapshot) => ({ ...snapshot, library: typeof next === 'function' ? next(snapshot.library) : next }))
+  }
+  const setProfile = (next: UserProfile) => {
+    controllerRef.current?.update((snapshot) => ({ ...snapshot, profile: next }))
+  }
 
   useEffect(() => {
     document.documentElement.removeAttribute('data-theme')
@@ -98,80 +109,65 @@ function App() {
   }, [])
 
   useEffect(() => {
-    libraryRef.current = library
-    saveLibrary(library)
-  }, [library])
-  useEffect(() => {
-    profileRef.current = profile
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile))
-  }, [profile])
-
-  useEffect(() => {
     if (!isCloudConfigured) return
     let active = true
-    const restoreSession = async (session: CloudSession | null) => {
-      const request = ++cloudRequestRef.current
-      cloudReadyRef.current = false
+    const unsubscribe = onCloudAuthChange((session) => {
+      if (!active) return
+      if (session && controllerRef.current?.persistence.userId === session.userId) return
+      controllerRef.current?.stop()
+      controllerRef.current = null
+      setSelected(null)
       setCloudSession(session)
-      if (!session) {
-        if (active) setCloudSyncStatus('signed-out')
-        return
-      }
-      if (active) setCloudSyncStatus('syncing')
+      if (!session) { setCloudSyncStatus('signed-out'); return }
       try {
-        const remote = await loadCloudSnapshot(session.userId)
-        if (!active || request !== cloudRequestRef.current) return
-        if (remote) {
-          libraryRef.current = remote.library
-          profileRef.current = remote.profile
-          setLibrary(remote.library)
-          setProfile(remote.profile)
-        } else {
-          await saveCloudSnapshot(session.userId, { library: libraryRef.current, profile: profileRef.current })
-          if (!active || request !== cloudRequestRef.current) return
-        }
-        cloudReadyRef.current = true
-        localStorage.setItem('watchline-last-sync', Date.now().toString())
-        setCloudSyncStatus('synced')
+        const controller = new LibraryController(new LibraryPersistence(localStorage, session.userId),
+          (draft) => commitCloudChanges(session.userId, draft),
+          (draft, status) => {
+            if (!active) return
+            setLibraryState(draft.snapshot.library)
+            setProfileState(draft.snapshot.profile)
+            setCloudSyncStatus(status)
+          })
+        controllerRef.current = controller
+        setLibraryState(controller.draft.snapshot.library)
+        setProfileState(controller.draft.snapshot.profile)
+        void controller.sync()
       } catch {
-        if (active && request === cloudRequestRef.current) {
-          setCloudSyncStatus('error')
-          setToast('Non riesco a sincronizzare i tuoi dati')
-        }
+        setCloudSyncStatus('storage-error')
+        setToast('Non riesco a leggere i dati locali. Conserva i dati del browser: non sono stati sovrascritti.')
       }
-    }
-    void getCloudSession().then(restoreSession).catch(() => {
-      if (active) setCloudSyncStatus('error')
     })
-    const unsubscribe = onCloudAuthChange((session) => { void restoreSession(session) })
+    const retry = () => {
+      setOnline(navigator.onLine)
+      if (navigator.onLine) void controllerRef.current?.sync()
+    }
+    const visible = () => { if (document.visibilityState === 'visible') retry() }
+    const storageChanged = (event: StorageEvent) => {
+      if (event.key === controllerRef.current?.persistence.key) void controllerRef.current?.sync()
+    }
+    const timer = window.setInterval(() => {
+      if (navigator.onLine && controllerRef.current?.status === 'error') void controllerRef.current.sync()
+    }, 15_000)
+    window.addEventListener('online', retry)
+    window.addEventListener('offline', retry)
+    window.addEventListener('focus', retry)
+    window.addEventListener('pageshow', retry)
+    document.addEventListener('visibilitychange', visible)
+    window.addEventListener('storage', storageChanged)
     return () => {
       active = false
       unsubscribe()
+      controllerRef.current?.stop()
+      controllerRef.current = null
+      window.clearInterval(timer)
+      window.removeEventListener('online', retry)
+      window.removeEventListener('offline', retry)
+      window.removeEventListener('focus', retry)
+      window.removeEventListener('pageshow', retry)
+      document.removeEventListener('visibilitychange', visible)
+      window.removeEventListener('storage', storageChanged)
     }
   }, [])
-
-  useEffect(() => {
-    if (!cloudSession || !cloudReadyRef.current) return
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      setCloudSyncStatus('syncing')
-      void saveCloudSnapshot(cloudSession.userId, { library, profile })
-        .then(() => {
-          if (cancelled) return
-          localStorage.setItem('watchline-last-sync', Date.now().toString())
-          setCloudSyncStatus('synced')
-        })
-        .catch(() => {
-          if (cancelled) return
-          setCloudSyncStatus('error')
-          setToast('Modifiche salvate sul dispositivo, ma non ancora nel cloud')
-        })
-    }, 700)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [library, profile, cloudSession])
 
   useEffect(() => {
     let cancelled = false
@@ -202,39 +198,48 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
-  const updateItem = (id: string, patch: Partial<MediaItem>) => {
-    setLibrary((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))
+  const updateItem = (id: string, patch: Partial<MediaItem>, fallback?: MediaItem) => {
+    if (!setLibrary((items) => items.some((item) => item.id === id)
+      ? items.map((item) => item.id === id ? { ...item, ...patch } : item)
+      : fallback ? [...items, { ...fallback, ...patch }] : items)) return false
     setSelected((item) => item?.id === id ? { ...item, ...patch } : item)
+    return true
   }
 
   const addOrRemove = (item: MediaItem) => {
     const exists = library.some((entry) => entry.id === item.id)
-    setLibrary((items) => exists ? items.filter((entry) => entry.id !== item.id) : [...items, { ...item, status: 'watchlist', statusIsManual: true }])
+    if (!setLibrary((items) => exists ? items.filter((entry) => entry.id !== item.id) : [...items, { ...item, status: 'watchlist', statusIsManual: true }])) return
     setToast(exists ? `${item.title} rimosso dalla libreria` : `${item.title} aggiunto alla libreria`)
   }
 
   const setItemStatus = (item: MediaItem, status: MediaStatus) => {
     const normalized = item.type === 'movie' && !['watchlist', 'completed'].includes(status) ? 'watchlist' : status
     const patch = { status: normalized, statusIsManual: true }
-    if (!library.some((entry) => entry.id === item.id)) setLibrary((items) => [...items, { ...item, ...patch }])
-    updateItem(item.id, patch)
+    if (!updateItem(item.id, patch, item)) return
     setToast(`${item.title}: ${STATUS_META[normalized].label}`)
   }
 
   const markNext = (item: MediaItem) => {
     if (item.type === 'movie') {
       const patch = { watchedEpisodes: 1, status: 'completed' as MediaStatus, statusIsManual: true }
-      if (!library.some((entry) => entry.id === item.id)) setLibrary((items) => [...items, { ...item, ...patch }])
-      updateItem(item.id, patch)
+      if (!updateItem(item.id, patch, item)) return
       setToast(`${item.title} segnato come visto`)
       return
     }
     const next = Math.min(Math.max(item.totalEpisodes, 1), item.watchedEpisodes + 1)
     const updated = { ...item, watchedEpisodes: next, statusIsManual: false }
     const patch = { watchedEpisodes: next, status: deriveStatus(updated), statusIsManual: false }
-    if (!library.some((entry) => entry.id === item.id)) setLibrary((items) => [...items, { ...item, ...patch }])
-    updateItem(item.id, patch)
-    setToast(next >= item.totalEpisodes ? 'Sei in pari con questa serie' : `Episodio ${next} segnato come visto`)
+    if (!updateItem(item.id, patch, item)) return
+    if (next >= item.totalEpisodes) void refreshCompletedSeries({ ...item, ...patch })
+    setToast(next >= item.totalEpisodes ? 'Controllo se ci sono nuovi episodi o stagioni' : `Episodio ${next} segnato come visto`)
+  }
+
+  const refreshCompletedSeries = async (item: MediaItem) => {
+    if (item.type !== 'tv' || !item.tmdbId) return
+    const livePatch = await getLiveDetails(item).catch(() => null)
+    if (!livePatch) return
+    const updated = { ...item, ...livePatch, statusIsManual: false }
+    updateItem(item.id, { ...livePatch, status: deriveStatus(updated), statusIsManual: false })
   }
 
   const syncItems = async (items: MediaItem[], notify = false) => {
@@ -242,11 +247,12 @@ function App() {
     if (!liveItems.length) { setToast('Aggiungi un titolo TMDB per sincronizzarlo'); return }
     if (notify) setToast('Aggiorno la libreria...')
     const updates = await Promise.all(liveItems.map(async (item) => ({ id: item.id, patch: await getLiveDetails(item).catch(() => ({})) })))
-    setLibrary((items) => items.map((item) => {
+    const saved = setLibrary((items) => items.map((item) => {
       const found = updates.find((update) => update.id === item.id)
       const merged = found ? { ...item, ...found.patch } : item
       return { ...merged, status: deriveStatus(merged) }
     }))
+    if (!saved) return
     localStorage.setItem('watchline-last-sync', Date.now().toString())
     if (notify) setToast('Libreria aggiornata')
   }
@@ -360,8 +366,8 @@ function App() {
           lastWatchedSeason: watched ? episode.season : selected.lastWatchedSeason,
           lastWatchedEpisode: watched ? episode.number : selected.lastWatchedEpisode,
         }
-        if (!library.some((entry) => entry.id === selected.id)) setLibrary((items) => [...items, { ...selected, ...patch }])
-        updateItem(selected.id, patch)
+        if (!updateItem(selected.id, patch, selected)) return
+        if (watched && count >= selected.totalEpisodes) void refreshCompletedSeries({ ...selected, ...patch })
         setToast(watched ? `${episode.title} segnato come visto` : `${episode.title} segnato come non visto`)
       }}
       onSeasonStatus={(seasonNumber, seasonStatus, visibleEpisodes) => {
@@ -384,8 +390,8 @@ function App() {
           statusIsManual: false,
           lastWatchedSeason: seasonStatus === 'completed' || seasonStatus === 'watching' ? seasonNumber : selected.lastWatchedSeason,
         }
-        if (!library.some((entry) => entry.id === selected.id)) setLibrary((items) => [...items, { ...selected, ...patch }])
-        updateItem(selected.id, patch)
+        if (!updateItem(selected.id, patch, selected)) return
+        if (seasonStatus === 'completed' && count >= selected.totalEpisodes) void refreshCompletedSeries({ ...selected, ...patch })
         setToast(`Stagione ${seasonNumber}: ${seasonStatus === 'watchlist' ? 'da vedere' : seasonStatus === 'watching' ? 'sto guardando' : 'completata'}`)
       }}
       episodes={detailEpisodes}
@@ -393,13 +399,13 @@ function App() {
       loading={detailLoading}
       onSeason={changeDetailSeason}
       onOpen={openDetail}
-      onRate={(rating) => { updateItem(selected.id, { personalRating: rating || undefined }); setToast(rating ? `Il tuo voto: ${rating} su 5` : 'Voto rimosso') }}
+      onRate={(rating) => { if (!updateItem(selected.id, { personalRating: rating || undefined })) return; setToast(rating ? `Il tuo voto: ${rating} su 5` : 'Voto rimosso') }}
       /> : (
     <>
       {activeTab === 'home' && <HomePage library={library} upcomingCatalog={upcomingCatalog} onOpen={openDetail} onMark={markNext} onNavigate={navigateTo} />}
       {activeTab === 'calendar' && <CalendarPageV2 library={library} onOpen={openDetail} />}
       {activeTab === 'library' && <LibraryPageV2 library={library} onOpen={openDetail} onNavigate={navigateTo} />}
-      {activeTab === 'profile' && <ProfilePage profile={profile} onChange={setProfile} />}
+      {activeTab === 'profile' && <><ProfilePage profile={profile} onChange={setProfile} /><LibrarySafetyPanel controller={controllerRef.current} userId={cloudSession.userId} onRecover={(items) => setLibrary((current) => [...current, ...items.filter((item) => !current.some((entry) => entry.id === item.id))])} /></>}
       {activeTab === 'analytics' && <AnalyticsPage library={library} />}
     </>
       )}
@@ -428,6 +434,14 @@ function App() {
             <button className="pulse-button" onClick={() => navigateTo('profile')} aria-label="Apri preferenze"><UserRound size={20} /></button>
           </div>
         </header>
+        <div className={`library-save-status ${cloudSyncStatus}`} role="status" aria-live="polite">
+          <Cloud size={15} /><span>{cloudSyncStatus === 'storage-error' ? 'Salvataggio sul dispositivo non riuscito. Le modifiche non sono confermate.'
+            : cloudSyncStatus === 'error' ? 'Modifiche sul dispositivo. Cloud non aggiornato: riprovo automaticamente.'
+              : !online ? 'Offline · copia conservata sul dispositivo'
+                : cloudSyncStatus === 'synced' ? 'Libreria salvata nel cloud'
+                  : 'Salvataggio nel cloud in corso…'}</span>
+          {(cloudSyncStatus === 'error' || cloudSyncStatus === 'storage-error') && <button onClick={() => controllerRef.current ? void controllerRef.current.sync() : window.location.reload()}>Riprova</button>}
+        </div>
         <main id="main-content" tabIndex={-1}>{page}</main>
         <nav className="bottom-nav" aria-label="Navigazione principale">
           {navItems.map(({ id, label, icon: Icon }) => (

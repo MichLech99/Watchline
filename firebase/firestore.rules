@@ -8,13 +8,27 @@ service cloud.firestore {
       }
 
       function validState() {
-        return request.resource.data.keys().hasOnly(['library', 'favoriteGenres', 'updatedAt'])
+        return request.resource.data.keys().hasOnly(['library', 'favoriteGenres', 'updatedAt', 'revision'])
+          && request.resource.data.library is list
+          && request.resource.data.favoriteGenres is list
+          && (!('revision' in request.resource.data) || (request.resource.data.revision is int && request.resource.data.revision >= 0));
+      }
+
+      allow read: if ownsDocument();
+      allow create: if ownsDocument() && validState();
+      // Once a client has enabled protected saves, older clients may not
+      // overwrite its library without advancing the transactional revision.
+      allow update: if ownsDocument() && validState()
+        && (!('revision' in resource.data)
+          || (request.resource.data.revision == resource.data.revision + 1));
+
+      match /backups/{backupId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow create, update: if request.auth != null && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(['library', 'favoriteGenres', 'updatedAt'])
           && request.resource.data.library is list
           && request.resource.data.favoriteGenres is list;
       }
-
-      allow read, delete: if ownsDocument();
-      allow create, update: if ownsDocument() && validState();
     }
   }
 }

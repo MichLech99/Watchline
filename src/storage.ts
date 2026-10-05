@@ -1,6 +1,7 @@
 import { getGenreIdsForNames } from './api'
 import type { MediaItem } from './types'
 const KEY = 'watchline-library-v1'
+const UPDATED_AT_KEY = 'watchline-library-updated-at'
 
 export function loadLibrary(): MediaItem[] {
   try {
@@ -36,4 +37,13 @@ export function loadLibrary(): MediaItem[] {
 
 export function saveLibrary(items: MediaItem[]) {
   localStorage.setItem(KEY, JSON.stringify(items))
+}
+
+export function loadLibraryUpdatedAt() {
+  const value = Number(localStorage.getItem(UPDATED_AT_KEY) || 0)
+  return Number.isFinite(value) ? value : 0
+}
+
+export function saveLibraryUpdatedAt(value: number) {
+  localStorage.setItem(UPDATED_AT_KEY, value.toString())
 }

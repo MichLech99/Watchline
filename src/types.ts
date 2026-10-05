@@ -32,6 +32,8 @@ export type MediaItem = {
   seasonCount?: number
   nextEpisode?: number
   nextAirDate?: string
+  /** Stato editoriale TMDB della serie, usato per rilevare una continuazione senza data. */
+  seriesStatus?: string
   watchProviders?: WatchProvider[]
   watchLink?: string
 }

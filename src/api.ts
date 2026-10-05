@@ -336,6 +336,7 @@ export async function getLiveDetails(item: MediaItem): Promise<Partial<MediaItem
     season: data.last_episode_to_air?.season_number || item.season,
     nextEpisode: data.next_episode_to_air?.episode_number,
     nextAirDate: isFutureDate(nextEpisodeAirDate) ? nextEpisodeAirDate : undefined,
+    seriesStatus: data.status || item.seriesStatus,
   }
 }
 

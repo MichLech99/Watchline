@@ -1,10 +1,13 @@
 import { getApp, getApps, initializeApp } from 'firebase/app'
 import { browserLocalPersistence, getAuth, onAuthStateChanged, setPersistence, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
-import { doc, getDoc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore/lite'
+import { collection, doc, getDoc, getDocs, getFirestore, limit, orderBy, query, runTransaction, serverTimestamp } from 'firebase/firestore/lite'
+import { removeUndefinedValues } from './cloud-data'
+import { mergeLibraryChanges, sameContent, type LibraryDraft } from './cloud-sync'
+import { validateSnapshot } from './library-persistence'
 import type { MediaItem } from './types'
 
 export type CloudProfile = { favoriteGenres: string[] }
-export type CloudSnapshot = { library: MediaItem[]; profile: CloudProfile }
+export type CloudSnapshot = { library: MediaItem[]; profile: CloudProfile; updatedAt: number }
 export type CloudSession = { userId: string; username: string }
 
 const firebaseConfig = {
@@ -77,17 +80,45 @@ const stateRef = (userId: string) => {
 export async function loadCloudSnapshot(userId: string): Promise<CloudSnapshot | null> {
   const snapshot = await getDoc(stateRef(userId))
   if (!snapshot.exists()) return null
-  const data = snapshot.data() as { library?: unknown; favoriteGenres?: unknown }
-  return {
-    library: Array.isArray(data.library) ? data.library as MediaItem[] : [],
-    profile: { favoriteGenres: Array.isArray(data.favoriteGenres) ? data.favoriteGenres.filter((value): value is string => typeof value === 'string') : [] },
-  }
+  return decodeSnapshot(snapshot.data())
 }
 
-export async function saveCloudSnapshot(userId: string, snapshot: CloudSnapshot) {
-  await setDoc(stateRef(userId), {
-    library: snapshot.library,
-    favoriteGenres: snapshot.profile.favoriteGenres,
-    updatedAt: serverTimestamp(),
-  }, { merge: true })
+function decodeSnapshot(data: Record<string, unknown>): CloudSnapshot {
+  const timestamp = data.updatedAt as { toMillis?: () => number } | undefined
+  const snapshot = { library: data.library as MediaItem[], profile: { favoriteGenres: data.favoriteGenres as string[] }, updatedAt: typeof timestamp?.toMillis === 'function' ? timestamp.toMillis() : typeof data.updatedAt === 'number' ? data.updatedAt : 0 }
+  validateSnapshot(snapshot) // Never turn malformed cloud data into an empty library.
+  return snapshot
+}
+
+export async function commitCloudChanges(userId: string, draft: LibraryDraft): Promise<CloudSnapshot> {
+  if (!db) throw new Error('Cloud non configurato')
+  const ref = stateRef(userId)
+  const day = new Date().toISOString().slice(0, 10)
+  return runTransaction(db, async (transaction) => {
+    const current = await transaction.get(ref)
+    const data = current.exists() ? current.data() : null
+    const remote = data ? decodeSnapshot(data) : { library: [], profile: { favoriteGenres: [] }, updatedAt: 0 }
+    const next = mergeLibraryChanges(draft.base, draft.snapshot, remote)
+    if (data && typeof data.revision === 'number' && sameContent(next.library, remote.library) && sameContent(next.profile, remote.profile)) return remote
+    const dailyRef = doc(ref, 'backups', `day-${day}`)
+    const daily = await transaction.get(dailyRef)
+    const revision = data && typeof data.revision === 'number' ? data.revision : 0
+    if (data) {
+      const backup = { library: data.library, favoriteGenres: data.favoriteGenres, updatedAt: data.updatedAt }
+      // Commit the previous version and its replacement atomically. If backup fails, nothing is overwritten.
+      transaction.set(doc(ref, 'backups', `recent-${revision % 20}`), backup)
+      if (!daily.exists()) transaction.set(dailyRef, backup)
+    }
+    transaction.set(ref, { library: removeUndefinedValues(next.library), favoriteGenres: next.profile.favoriteGenres, updatedAt: serverTimestamp(), revision: revision + 1 })
+    return next
+  })
+}
+
+export type CloudBackup = { id: string; savedAt: number; snapshot: CloudSnapshot }
+export async function listCloudBackups(userId: string): Promise<CloudBackup[]> {
+  const backups = await getDocs(query(collection(stateRef(userId), 'backups'), orderBy('updatedAt', 'desc'), limit(30)))
+  return backups.docs.map((entry) => {
+    const snapshot = decodeSnapshot(entry.data())
+    return { id: entry.id, savedAt: snapshot.updatedAt, snapshot }
+  }).sort((a, b) => b.savedAt - a.savedAt)
 }
