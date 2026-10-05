@@ -507,6 +507,17 @@ function SectionHeader({ title, action, onAction }: { title: string; action?: st
 function HomePage({ library, upcomingCatalog, onOpen, onMark, onNavigate }: {
   library: MediaItem[]; upcomingCatalog: MediaItem[]; onOpen: (item: MediaItem) => void; onMark: (item: MediaItem) => void; onNavigate: (tab: TabId) => void
 }) {
+  const [localHour, setLocalHour] = useState(() => new Date().getHours())
+  useEffect(() => {
+    const updateHour = () => setLocalHour(new Date().getHours())
+    const timer = window.setInterval(updateHour, 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const greeting = localHour >= 5 && localHour < 12
+    ? 'Buongiorno Valentina'
+    : localHour >= 18 || localHour < 5
+      ? 'Buonasera Valentina'
+      : 'Cosa guardi oggi?'
   const current = library.find((item) => item.status === 'watching')
   const upcoming = [
     ...library.filter((item) => item.type === 'tv' && isUpcomingDate(item.nextAirDate)),
@@ -514,7 +525,7 @@ function HomePage({ library, upcomingCatalog, onOpen, onMark, onNavigate }: {
   ].sort((a, b) => (a.nextAirDate || '').localeCompare(b.nextAirDate || '')).slice(0, 6)
   const watchlist = library.filter((item) => item.status === 'watchlist')
   return <div className="page home-page">
-    <div className="page-intro home-intro"><p className="eyebrow">La tua visione</p><h1>Cosa guardi oggi?</h1><p>{current ? 'Hai un episodio pronto da riprendere.' : 'Scegli un titolo per la tua prossima serata.'}</p></div>
+    <div className="page-intro home-intro"><p className="eyebrow">La tua visione</p><h1>{greeting}</h1><p>{current ? 'Hai un episodio pronto da riprendere.' : 'Scegli un titolo per la tua prossima serata.'}</p></div>
     {current ? <article className="continue-card home-now" style={{ '--backdrop': `url(${current.backdrop})` } as React.CSSProperties}>
       <button className="continue-main" onClick={() => onOpen(current)} aria-label={`Apri ${current.title}`}>
         <div className="continue-copy"><span className="kicker">Continua a guardare</span><h2>{current.title}</h2><p>S{current.season || 1} · prossimo episodio {current.watchedEpisodes + 1}</p>
