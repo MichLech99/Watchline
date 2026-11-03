@@ -79,6 +79,8 @@ function App() {
   const [detailEpisodes, setDetailEpisodes] = useState<Episode[]>([])
   const [detailSeason, setDetailSeason] = useState(1)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState(false)
+  const [detailsError, setDetailsError] = useState(false)
   const [apiMode, setApiMode] = useState<'loading' | 'live' | 'demo'>('loading')
   const [catalogRevision, setCatalogRevision] = useState(0)
   const [cloudSession, setCloudSession] = useState<CloudSession | null>(null)
@@ -275,12 +277,17 @@ function App() {
     const season = initial.type === 'tv' ? Number(activeSeason || 1) : 1
     setSelected(initial)
     setDetailSeason(season)
+    setDetailError(false)
+    setDetailsError(false)
     setDetailEpisodes(initial.tmdbId ? [] : demoEpisodes(initial))
     if (initial.tmdbId) {
       setDetailLoading(true)
       void (async () => {
         try {
-          const patch = await getLiveDetails(initial)
+          const patch = await getLiveDetails(initial).catch(() => {
+            if (detailRequestRef.current === detailRequest) setDetailsError(true)
+            return {}
+          })
           if (detailRequestRef.current !== detailRequest) return
           const updated = { ...initial, ...patch }
           setSelected(updated)
@@ -288,7 +295,7 @@ function App() {
           const episodes = await getSeasonEpisodes(updated, season)
           if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest) setDetailEpisodes(episodes)
         } catch {
-          if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest) setDetailEpisodes([])
+          if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest) { setDetailEpisodes([]); setDetailError(true) }
         } finally {
           if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest) setDetailLoading(false)
         }
@@ -314,9 +321,13 @@ function App() {
     const seasonRequest = ++seasonRequestRef.current
     const selectedId = selected.id
     setDetailSeason(season)
+    setDetailError(false)
     if (!selected.tmdbId) { setDetailEpisodes(demoEpisodes({ ...selected, season })); return }
     setDetailLoading(true)
-    const episodes = await getSeasonEpisodes(selected, season).catch(() => [])
+    const episodes = await getSeasonEpisodes(selected, season).catch(() => {
+      if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest) setDetailError(true)
+      return []
+    })
     if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest && selectedId === selected.id) setDetailEpisodes(episodes)
     if (detailRequestRef.current === detailRequest && seasonRequestRef.current === seasonRequest) setDetailLoading(false)
   }
@@ -391,6 +402,9 @@ function App() {
       episodes={detailEpisodes}
       season={detailSeason}
       loading={detailLoading}
+      error={detailError}
+      detailsError={detailsError}
+      onRetryDetails={() => openDetail(selected)}
       onSeason={changeDetailSeason}
       onOpen={openDetail}
       onRate={(rating) => { updateItem(selected.id, { personalRating: rating || undefined }); setToast(rating ? `Il tuo voto: ${rating} su 5` : 'Voto rimosso') }}
@@ -997,13 +1011,13 @@ function LibraryPageV2({ library, onOpen, onNavigate }: { library: MediaItem[]; 
   </div>
 }
 
-function DetailPageV2({ item, saved, onBack, onToggle, onStatus, onMark, onEpisode, onSeasonStatus, onOpen, onRate, episodes, season, loading, onSeason }: {
+function DetailPageV2({ item, saved, onBack, onToggle, onStatus, onMark, onEpisode, onSeasonStatus, onOpen, onRate, episodes, season, loading, error, detailsError, onRetryDetails, onSeason }: {
   item: MediaItem; saved: boolean; onBack: () => void; onToggle: () => void; onMark: () => void;
   onStatus: (status: MediaStatus) => void;
   onEpisode: (episode: Episode, watched: boolean, visibleEpisodes: Episode[]) => void;
   onSeasonStatus: (season: number, status: SeasonStatus, visibleEpisodes: Episode[]) => void;
   onOpen: (item: MediaItem) => void; onRate: (rating: number) => void;
-  episodes: Episode[]; season: number; loading: boolean; onSeason: (season: number) => void
+  episodes: Episode[]; season: number; loading: boolean; error: boolean; detailsError: boolean; onRetryDetails: () => void; onSeason: (season: number) => void
 }) {
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null)
   const [providersOpen, setProvidersOpen] = useState(false)
@@ -1046,7 +1060,7 @@ function DetailPageV2({ item, saved, onBack, onToggle, onStatus, onMark, onEpiso
       {item.type === 'movie' && <section className="movie-status"><p className="eyebrow">{saved ? 'Nella tua libreria' : 'Aggiungi alla libreria'}</p><div className="movie-status-actions"><button className={saved && item.status === 'watchlist' ? 'active watchlist' : ''} aria-pressed={saved && item.status === 'watchlist'} onClick={() => onStatus('watchlist')}><Star />Da vedere{saved && item.status === 'watchlist' && <Check />}</button><button className={saved && item.status === 'completed' ? 'active completed' : ''} aria-pressed={saved && item.status === 'completed'} onClick={() => onStatus('completed')}><CircleCheck />Visto{saved && item.status === 'completed' && <Check />}</button></div></section>}
       {saved && <section className="personal-rating"><div><p className="eyebrow">Il tuo voto</p><strong>{item.personalRating ? `${item.personalRating} su 5` : 'Non ancora valutato'}</strong></div><div className="rating-stars" role="group" aria-label="Il tuo voto">{[1, 2, 3, 4, 5].map((value) => <button key={value} className={item.personalRating && item.personalRating >= value ? 'active' : ''} aria-label={`${value} su 5`} onClick={() => onRate(item.personalRating === value ? 0 : value)}><Star /></button>)}</div></section>}
       {item.type === 'tv' && <section className="progress-panel"><div className="progress-ring" style={{ '--progress': `${progress * 3.6}deg` } as React.CSSProperties}><span>{progress}%</span></div><div><span>Il tuo avanzamento</span><strong>{item.watchedEpisodes} di {item.totalEpisodes} episodi visti</strong><span className="progress"><i style={{ width: `${progress}%` }} /></span></div></section>}
-      {item.type === 'tv' ? <section className="episode-section"><SectionHeader title={`Stagione ${season}`} />{(item.seasonCount || 1) > 1 && <div className="season-tabs">{Array.from({ length: item.seasonCount || 1 }, (_, index) => index + 1).map((number) => { const tabStatus = getSeasonStatus(number); const statusLabel = tabStatus === 'completed' ? 'Completata' : tabStatus === 'watching' ? 'In corso' : 'Da vedere'; return <button key={number} className={`${season === number ? 'active ' : ''}${tabStatus}`} onClick={() => onSeason(number)} aria-label={`Stagione ${number}: ${statusLabel}`} aria-current={season === number ? 'true' : undefined}><span>S{number}</span><i aria-hidden="true">{tabStatus === 'completed' ? <Check /> : tabStatus === 'watching' ? <Activity /> : <Circle />}</i></button> })}</div>}<div className="series-status-control"><p className="eyebrow">Stato della serie</p><div className="status-options">{(['watching', 'caught-up', 'waiting', 'completed'] as MediaStatus[]).map((status) => <button key={status} className={`${status} ${item.status === status ? 'active' : ''}`} aria-pressed={item.status === status} onClick={() => onStatus(status)}>{STATUS_META[status].short}</button>)}</div></div><div className="season-state-control"><div><p className="eyebrow">Stato di questa stagione</p><strong>Stagione {season}</strong></div><button className={`status-trigger ${seasonStatus}`} onClick={() => setSeasonMenuOpen(true)}>{seasonStatus === 'watchlist' ? <Star /> : <CircleCheck />}{seasonStatus === 'watchlist' ? 'Da vedere' : seasonStatus === 'watching' ? 'In corso' : 'Completata'}<ChevronDown /></button></div>{seasonMenuOpen && <div className="status-sheet-wrap" role="presentation"><button className="status-sheet-backdrop" onClick={() => setSeasonMenuOpen(false)} aria-label="Chiudi selezione stagione" /><section className="status-sheet" aria-label="Scegli stato stagione"><div className="status-sheet-handle" /><p className="eyebrow">{item.title} · Stagione {season}</p><h2>Stato della stagione</h2><div>{(['watchlist', 'watching', 'completed'] as SeasonStatus[]).map((status) => <button key={status} className={`${status} ${seasonStatus === status ? 'active' : ''}`} onClick={() => { onSeasonStatus(season, status, episodes); setSeasonMenuOpen(false) }}>{status === 'watchlist' ? <Star /> : <CircleCheck />}{status === 'watchlist' ? 'Da vedere' : status === 'watching' ? 'In corso' : 'Completata'}{seasonStatus === status && <Check />}</button>)}</div></section></div>}{loading ? <div className="episode-loading"><RefreshCw /> Carico gli episodi...</div> : episodes.length ? <div className="episode-list">{episodes.map((episode, index) => { const watched = isWatched(episode, index); return <article key={episode.id}><button className="episode-main" onClick={() => setSelectedEpisode(episode)}><img src={episode.still} alt="" /><span className="episode-number">{episode.number}</span><div><strong>{episode.title}</strong><small>{episode.runtime} min · {formatDate(episode.airDate)}</small></div><ChevronRight /></button><button className={`episode-check ${watched ? 'watched' : ''}`} onClick={() => onEpisode(episode, !watched, episodes)} aria-label={watched ? `Segna ${episode.title} come non visto` : `Segna ${episode.title} come visto`}>{watched ? <Check /> : <Circle />}</button></article> })}</div> : <EmptyState icon={Tv} text="Gli episodi non sono ancora disponibili per questa stagione." />}<button className="primary-action" onClick={onMark}><CircleCheck /> Segna il prossimo episodio come visto</button></section> : null}
+      {item.type === 'tv' ? <section className="episode-section"><SectionHeader title={`Stagione ${season}`} />{detailsError && <div className="episode-loading" role="alert">Impossibile aggiornare le stagioni. <button onClick={onRetryDetails}>Riprova</button></div>}{(item.seasonCount || 1) > 1 && <div className="season-tabs">{Array.from({ length: item.seasonCount || 1 }, (_, index) => index + 1).map((number) => { const tabStatus = getSeasonStatus(number); const statusLabel = tabStatus === 'completed' ? 'Completata' : tabStatus === 'watching' ? 'In corso' : 'Da vedere'; return <button key={number} className={`${season === number ? 'active ' : ''}${tabStatus}`} onClick={() => onSeason(number)} aria-label={`Stagione ${number}: ${statusLabel}`} aria-current={season === number ? 'true' : undefined}><span>S{number}</span><i aria-hidden="true">{tabStatus === 'completed' ? <Check /> : tabStatus === 'watching' ? <Activity /> : <Circle />}</i></button> })}</div>}<div className="series-status-control"><p className="eyebrow">Stato della serie</p><div className="status-options">{(['watching', 'caught-up', 'waiting', 'completed'] as MediaStatus[]).map((status) => <button key={status} className={`${status} ${item.status === status ? 'active' : ''}`} aria-pressed={item.status === status} onClick={() => onStatus(status)}>{STATUS_META[status].short}</button>)}</div></div><div className="season-state-control"><div><p className="eyebrow">Stato di questa stagione</p><strong>Stagione {season}</strong></div><button className={`status-trigger ${seasonStatus}`} onClick={() => setSeasonMenuOpen(true)}>{seasonStatus === 'watchlist' ? <Star /> : <CircleCheck />}{seasonStatus === 'watchlist' ? 'Da vedere' : seasonStatus === 'watching' ? 'In corso' : 'Completata'}<ChevronDown /></button></div>{seasonMenuOpen && <div className="status-sheet-wrap" role="presentation"><button className="status-sheet-backdrop" onClick={() => setSeasonMenuOpen(false)} aria-label="Chiudi selezione stagione" /><section className="status-sheet" aria-label="Scegli stato stagione"><div className="status-sheet-handle" /><p className="eyebrow">{item.title} · Stagione {season}</p><h2>Stato della stagione</h2><div>{(['watchlist', 'watching', 'completed'] as SeasonStatus[]).map((status) => <button key={status} className={`${status} ${seasonStatus === status ? 'active' : ''}`} onClick={() => { onSeasonStatus(season, status, episodes); setSeasonMenuOpen(false) }}>{status === 'watchlist' ? <Star /> : <CircleCheck />}{status === 'watchlist' ? 'Da vedere' : status === 'watching' ? 'In corso' : 'Completata'}{seasonStatus === status && <Check />}</button>)}</div></section></div>}{loading ? <div className="episode-loading"><RefreshCw /> Carico gli episodi...</div> : error ? <div className="episode-loading" role="alert">Impossibile caricare gli episodi. <button onClick={() => onSeason(season)}>Riprova</button></div> : episodes.length ? <div className="episode-list">{episodes.map((episode, index) => { const watched = isWatched(episode, index); return <article key={episode.id}><button className="episode-main" onClick={() => setSelectedEpisode(episode)}><img src={episode.still} alt="" /><span className="episode-number">{episode.number}</span><div><strong>{episode.title}</strong><small>{episode.runtime} min · {formatDate(episode.airDate)}</small></div><ChevronRight /></button><button className={`episode-check ${watched ? 'watched' : ''}`} onClick={() => onEpisode(episode, !watched, episodes)} aria-label={watched ? `Segna ${episode.title} come non visto` : `Segna ${episode.title} come visto`}>{watched ? <Check /> : <Circle />}</button></article> })}</div> : <EmptyState icon={Tv} text="Gli episodi non sono ancora disponibili per questa stagione." />}<button className="primary-action" onClick={onMark}><CircleCheck /> Segna il prossimo episodio come visto</button></section> : null}
       {similar.length > 0 && <section className="similar-section"><SectionHeader title="Titoli simili" /><div className="poster-rail">{similar.map((entry) => <PosterCard key={entry.id} item={entry} onClick={() => onOpen(entry)} />)}</div></section>}
     </div>
   </div>
