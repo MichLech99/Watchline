@@ -131,15 +131,9 @@ export async function getItalianCatalog() {
 
 export async function searchTmdb(query: string, type: 'multi' | 'tv' | 'movie' = 'multi') {
   const data = await request(`/3/search/${type}`, { query, include_adult: 'false', region: 'IT' })
-  const items = (data.results as TmdbResult[]).map(mapResult).filter(Boolean).slice(0, 12) as MediaItem[]
-  const checked = await Promise.all(items.map(async (item) => ({
-    item,
-    eligible: await Promise.all([
-      isAvailableInItaly(item).catch(() => false),
-      hasItalianTranslation(item).catch(() => false),
-    ]).then(([available, localized]) => available && localized),
-  })))
-  return checked.filter(({ eligible }) => eligible).map(({ item }) => item)
+  return (data.results as TmdbResult[])
+    .filter((item) => !item.media_type || item.media_type === 'tv' || item.media_type === 'movie')
+    .map(mapResult).filter(Boolean).slice(0, 12) as MediaItem[]
 }
 
 export async function getExploreCatalog(feed: ExploreFeed, type: 'all' | 'tv' | 'movie' = 'all', genres: CatalogGenre[] = [], page = 1): Promise<MediaItem[]> {
